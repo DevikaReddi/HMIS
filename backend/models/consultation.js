@@ -31,6 +31,7 @@ const ReportSchema = new Schema({
 const ConsultationSchema = new Schema({
   patient_id: { type: Schema.Types.ObjectId, ref: 'Patient' },
   doctor_id: { type: Schema.Types.ObjectId, ref: 'Doctor' },
+  dept_id: { type: Schema.Types.ObjectId, ref: 'Department' },
   appointment_date: Date,
   start_time: String,
   status: { 
@@ -50,6 +51,7 @@ const ConsultationSchema = new Schema({
 
 // Add a feedback subdocument schema
 const FeedbackSchema = new Schema({
+  dept_id: { type: Schema.Types.ObjectId, ref: 'Department' },
   rating: { type: Number, enum: [1, 2, 3, 4, 5] },
   comments: String,
   created_at: { type: Date, default: Date.now }
@@ -61,4 +63,5 @@ ConsultationSchema.add({
 });
 
 const Consultation = mongoose.model('Consultation', ConsultationSchema);
-export default Consultation;
+const Feedback = mongoose.model('Feedback', FeedbackSchema);
+export { Consultation,Feedback };
