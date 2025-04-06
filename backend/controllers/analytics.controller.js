@@ -1,5 +1,10 @@
 import {Consultation,Feedback} from '../models/consultation.js';
 import {Room,DailyOccupancy} from '../models/facility.js';
+import {MedicineInventoryLog} from '../models/logs.js';
+import Medicine from '../models/inventory.js';
+import {Bill,BillItem} from '../models/bill.js'
+import {PrescriptionEntry,Prescription} from '../models/consultation.js';
+ 
 // import mongoose from 'mongoose';
 
 // const insertSampleConsultation = async () => {
@@ -356,4 +361,282 @@ export const updateDailyOccupancy = async () => {
     } catch (error) {
         console.error('Error updating daily occupancy:', error);
     }
+};
+
+/**
+ * Get medicine inventory trends data
+ * @route GET /api/analytics/medicine-inventory
+ * @param {string} medicineId - Medicine ID
+ * @param {date} startDate - Start date for analysis
+ * @param {date} endDate - End date for analysis
+ */
+export const getMedicineInventoryTrends = async (req, res) => {
+  try {
+    const { medicineId, startDate, endDate } = req.query;
+ 
+    // Validate dates
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+ 
+    // Query MedicineInventoryLog for the specified medicine and date range
+    const inventoryLogs = await MedicineInventoryLog.aggregate([
+      {
+        $match: {
+          med_id: parseInt(medicineId),
+          order_date: { $gte: start, $lte: end },
+          status: "received"
+        }
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$order_date" },
+            month: { $month: "$order_date" }
+          },
+          totalQuantity: { $sum: "$quantity" }
+        }
+      },
+      {
+        $sort: {
+          "_id.year": 1,
+          "_id.month": 1
+        }
+      }
+    ]);
+ 
+    // Format monthly data
+    const monthLabels = [];
+    const monthValues = [];
+ 
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    inventoryLogs.forEach(item => {
+      const monthName = monthNames[item._id.month - 1];
+      monthLabels.push(`${monthName} ${item._id.year}`);
+      monthValues.push(item.totalQuantity);
+    });
+ 
+    // Get weekly data for each month
+    const weeklyDataByMonth = {};
+ 
+    for (const monthLabel of monthLabels) {
+      const [month, year] = monthLabel.split(' ');
+      const monthIndex = monthNames.indexOf(month);
+ 
+      // Find first and last day of the month
+      const firstDay = new Date(parseInt(year), monthIndex, 1);
+      const lastDay = new Date(parseInt(year), monthIndex + 1, 0);
+ 
+      // Group by week within month
+      const weeklyData = await MedicineInventoryLog.aggregate([
+        {
+          $match: {
+            med_id: parseInt(medicineId),
+            order_date: { $gte: firstDay, $lte: lastDay },
+            status: "received"
+          }
+        },
+        {
+          $project: {
+            week: { $ceil: { $divide: [{ $dayOfMonth: "$order_date" }, 7] } },
+            quantity: 1
+          }
+        },
+        {
+          $group: {
+            _id: "$week",
+            totalQuantity: { $sum: "$quantity" }
+          }
+        },
+        {
+          $sort: { "_id": 1 }
+        }
+      ]);
+ 
+      // Format weekly data
+      const weekLabels = [];
+      const weekValues = [];
+ 
+      weeklyData.forEach((item) => {
+        weekLabels.push(`Week ${item._id}`);
+        weekValues.push(item.totalQuantity);
+      });
+ 
+      weeklyDataByMonth[monthLabel] = {
+        labels: weekLabels,
+        values: weekValues
+      };
+    }
+ 
+    // Get medicine details
+    const medicine = await Medicine.findOne({ med_id: parseInt(medicineId) });
+ 
+    // Calculate total orders
+    const totalOrders = monthValues.reduce((sum, val) => sum + val, 0);
+ 
+    // Return formatted data
+    res.json({
+      medicine: {
+        id: medicine.med_id.toString(),
+        name: medicine.med_name
+      },
+      monthlyData: {
+        labels: monthLabels,
+        values: monthValues
+      },
+      weeklyDataByMonth,
+      totalOrders
+    });
+ 
+  } catch (error) {
+    console.error('Error fetching medicine inventory trends:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+ 
+/**
+ * Get medicine prescription trends data
+ * @route GET /api/analytics/medicine-prescriptions
+ * @param {string} medicineId - Medicine ID
+ * @param {date} startDate - Start date for analysis
+ * @param {date} endDate - End date for analysis
+ */
+export const getMedicinePrescriptionTrends = async (req, res) => {
+  try {
+    const { medicineId, startDate, endDate } = req.query;
+ 
+    // Validate dates
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+ 
+    // Get all bills in the date range
+    const bills = await Bill.find({
+      generation_date: { $gte: start, $lte: end }
+    });
+ 
+    // Group data by month
+    const monthlyData = {};
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+ 
+    // Process each bill
+    for (const bill of bills) {
+      // Get bill items for this bill
+      const billItems = await BillItem.find({
+        bill_id: bill.bill_id,
+        item_type: "medication"
+      });
+ 
+      // Process each bill item
+      for (const item of billItems) {
+        if (item.prescription_id) {
+          // Find prescription entries for this medicine
+          const prescriptionEntries = await PrescriptionEntry.find({
+            prescription_id: item.prescription_id,
+            medicine_id: parseInt(medicineId)
+          });
+ 
+          // Calculate total dispensed quantity
+          const dispensedQty = prescriptionEntries.reduce((sum, entry) => sum + entry.dispensed_qty, 0);
+ 
+          if (dispensedQty > 0) {
+            // Format the month key
+            const date = new Date(bill.generation_date);
+            const year = date.getFullYear();
+            const month = date.getMonth();
+            const monthLabel = `${monthNames[month]} ${year}`;
+ 
+            // Add to monthly data
+            if (!monthlyData[monthLabel]) {
+              monthlyData[monthLabel] = {
+                count: 0,
+                quantity: 0,
+                weeklyData: {}
+              };
+            }
+ 
+            monthlyData[monthLabel].count += 1;
+            monthlyData[monthLabel].quantity += dispensedQty;
+ 
+            // Track weekly data
+            const weekNum = Math.ceil(date.getDate() / 7);
+            const weekKey = `Week ${weekNum}`;
+ 
+            if (!monthlyData[monthLabel].weeklyData[weekKey]) {
+              monthlyData[monthLabel].weeklyData[weekKey] = {
+                count: 0,
+                quantity: 0
+              };
+            }
+ 
+            monthlyData[monthLabel].weeklyData[weekKey].count += 1;
+            monthlyData[monthLabel].weeklyData[weekKey].quantity += dispensedQty;
+          }
+        }
+      }
+    }
+ 
+    // Format the data for the frontend
+    const monthLabels = [];
+    const monthValues = [];
+    const weeklyDataByMonth = {};
+ 
+    // Sort the months chronologically
+    const sortedMonths = Object.keys(monthlyData).sort((a, b) => {
+      const [monthA, yearA] = a.split(' ');
+      const [monthB, yearB] = b.split(' ');
+ 
+      if (yearA !== yearB) {
+        return parseInt(yearA) - parseInt(yearB);
+      }
+ 
+      return monthNames.indexOf(monthA) - monthNames.indexOf(monthB);
+    });
+ 
+    for (const monthKey of sortedMonths) {
+      monthLabels.push(monthKey);
+      monthValues.push(monthlyData[monthKey].quantity);
+ 
+      // Format weekly data
+      const weeklyLabels = [];
+      const weeklyValues = [];
+ 
+      // Sort weeks numerically
+      const weekKeys = Object.keys(monthlyData[monthKey].weeklyData).sort((a, b) => {
+        return parseInt(a.split(' ')[1]) - parseInt(b.split(' ')[1]);
+      });
+ 
+      for (const weekKey of weekKeys) {
+        weeklyLabels.push(weekKey);
+        weeklyValues.push(monthlyData[monthKey].weeklyData[weekKey].quantity);
+      }
+ 
+      weeklyDataByMonth[monthKey] = {
+        labels: weeklyLabels,
+        values: weeklyValues
+      };
+    }
+ 
+    // Get medicine details
+    const medicine = await Medicine.findOne({ med_id: parseInt(medicineId) });
+ 
+    // Calculate total prescriptions
+    const totalPrescriptionsQuantity = monthValues.reduce((sum, val) => sum + val, 0);
+ 
+    // Return formatted data
+    res.json({
+      medicine: {
+        id: medicine.med_id.toString(),
+        name: medicine.med_name
+      },
+      monthlyData: {
+        labels: monthLabels,
+        values: monthValues
+      },
+      weeklyDataByMonth,
+      totalPrescriptionsQuantity
+    });
+ 
+  } catch (error) {
+    console.error('Error fetching medicine prescription trends:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
 };
