@@ -23,7 +23,8 @@ const MedicineSchema = new Schema({
   }] // Embedded inventory array
 }, { timestamps: true , _id : false});
 
-MedicineSchema.plugin(AutoIncrement, { inc_field: '_id', start_seq: 10000, increment_by: 1 });
+//  MedicineSchema.plugin(AutoIncrement, { inc_field: '_id', start_seq: 10000, increment_by: 1 });
+MedicineSchema.plugin(AutoIncrement, { inc_field: '_id', id: 'medicine_id_counter', start_seq: 10000, increment_by: 1 });
 
 const Medicine = mongoose.model('Medicine', MedicineSchema);
 export default Medicine;
